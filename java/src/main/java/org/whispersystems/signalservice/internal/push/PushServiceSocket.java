@@ -56,14 +56,19 @@ import java.net.URLEncoder;
 import java.security.KeyManagementException;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
+import java.security.cert.CertificateException;
+import java.security.cert.X509Certificate;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
+import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.KeyManager;
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSession;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 
@@ -84,6 +89,7 @@ public class PushServiceSocket {
 
   private static final String TAG = PushServiceSocket.class.getSimpleName();
 
+  private static final String CREATE_ACCOUNT_EMAIL_PATH = "/v1/accounts/email/code/%s";
   private static final String CREATE_ACCOUNT_SMS_PATH   = "/v1/accounts/sms/code/%s";
   private static final String CREATE_ACCOUNT_VOICE_PATH = "/v1/accounts/voice/code/%s";
   private static final String VERIFY_ACCOUNT_CODE_PATH  = "/v1/accounts/code/%s";
@@ -126,9 +132,21 @@ public class PushServiceSocket {
     this.random              = new SecureRandom();
   }
 
-  public void createAccount(boolean voice) throws IOException {
-    String path = voice ? CREATE_ACCOUNT_VOICE_PATH : CREATE_ACCOUNT_SMS_PATH;
-    makeServiceRequest(String.format(path, credentialsProvider.getUser()), "GET", null);
+  public String createAccount(String transport) throws IOException {
+    String path = "";
+
+    switch (transport) {
+      case "email":
+        path = CREATE_ACCOUNT_EMAIL_PATH;
+        break;
+      case "sms":
+        path = CREATE_ACCOUNT_SMS_PATH;
+        break;
+      case "voice":
+        path = CREATE_ACCOUNT_VOICE_PATH;
+        break;
+    }
+    return makeServiceRequest(String.format(path, credentialsProvider.getUser()), "GET", null);
   }
 
   public void verifyAccountCode(String verificationCode, String signalingKey, int registrationId, boolean fetchesMessages, String pin)
@@ -345,10 +363,19 @@ public class PushServiceSocket {
 
     Log.w(TAG, "Got attachment content location: " + attachmentKey.getLocation());
 
-    byte[] digest = uploadAttachment("PUT", attachmentKey.getLocation(), attachment.getData(),
-                                     attachment.getDataSize(), attachment.getOutputStreamFactory(), attachment.getListener());
+      byte[] digest = new byte[0];
+      try {
+          digest = uploadAttachment("PUT", attachmentKey.getLocation(), attachment.getData(),
+                                           attachment.getDataSize(), attachment.getOutputStreamFactory(), attachment.getListener());
+      } catch (NoSuchAlgorithmException e) {
+          e.printStackTrace();
+          throw new IOException("Server failed to upload attachment!");
+      } catch (KeyManagementException e) {
+          e.printStackTrace();
+          throw new IOException("Server failed to upload attachment!");
+      }
 
-    return new Pair<>(attachmentKey.getId(), digest);
+      return new Pair<>(attachmentKey.getId(), digest);
   }
 
   public void retrieveAttachment(String relay, long attachmentId, File destination, int maxSizeBytes, ProgressListener listener) throws IOException {
@@ -388,8 +415,7 @@ public class PushServiceSocket {
   }
 
   public void setProfileAvatar(ProfileAvatarData profileAvatar)
-      throws NonSuccessfulResponseCodeException, PushNetworkException
-  {
+          throws IOException {
     String                        response       = makeServiceRequest(String.format(PROFILE_PATH, "form/avatar"), "GET", null);
     ProfileAvatarUploadAttributes formAttributes;
 
@@ -401,12 +427,24 @@ public class PushServiceSocket {
     }
 
     if (profileAvatar != null) {
-      uploadToCdn(formAttributes.getAcl(), formAttributes.getKey(),
+      String url = "";
+      try {
+        uploadAttachment("PUT", url, profileAvatar.getData(), profileAvatar.getDataLength(), profileAvatar.getOutputStreamFactory(), null);
+      } catch (IOException e) {
+        e.printStackTrace();
+      } catch (NoSuchAlgorithmException e) {
+        e.printStackTrace();
+        throw new IOException("Server failed to upload avatar!");
+      } catch (KeyManagementException e) {
+        e.printStackTrace();
+        throw new IOException("Server failed to upload avatar!");
+      }
+      /*uploadToCdn(formAttributes.getAcl(), formAttributes.getKey(),
                   formAttributes.getPolicy(), formAttributes.getAlgorithm(),
                   formAttributes.getCredential(), formAttributes.getDate(),
                   formAttributes.getSignature(), profileAvatar.getData(),
                   profileAvatar.getContentType(), profileAvatar.getDataLength(),
-                  profileAvatar.getOutputStreamFactory());
+                  profileAvatar.getOutputStreamFactory());*/
     }
   }
 
@@ -502,10 +540,21 @@ public class PushServiceSocket {
 
   private byte[] uploadAttachment(String method, String url, InputStream data,
                                   long dataSize, OutputStreamFactory outputStreamFactory, ProgressListener listener)
-    throws IOException
-  {
+          throws IOException, NoSuchAlgorithmException, KeyManagementException {
+
+      SSLContext ctx = SSLContext.getInstance("TLS");
+      ctx.init(new KeyManager[0], new TrustManager[] {new AttachmentsTrustManager()}, new SecureRandom());
+      SSLContext.setDefault(ctx);
+
     URL                uploadUrl  = new URL(url);
-    HttpsURLConnection connection = (HttpsURLConnection) uploadUrl.openConnection();
+      HttpsURLConnection connection = (HttpsURLConnection) uploadUrl.openConnection();
+      connection.setHostnameVerifier(new HostnameVerifier() {
+          @Override
+          public boolean verify(String arg0, SSLSession arg1) {
+              return true;
+          }
+      });
+
     connection.setDoOutput(true);
 
     if (dataSize > 0) {
@@ -806,6 +855,7 @@ public class PushServiceSocket {
       List<ConnectionHolder> connectionHolders = new LinkedList<>();
 
       for (SignalUrl url : urls) {
+
         TrustManager[] trustManagers = BlacklistingTrustManager.createFor(url.getTrustStore());
 
         SSLContext context = SSLContext.getInstance("TLS");
@@ -911,4 +961,22 @@ public class PushServiceSocket {
       return hostHeader;
     }
   }
+
+    private class AttachmentsTrustManager implements X509TrustManager {
+
+        @Override
+        public void checkClientTrusted(X509Certificate[] arg0, String arg1) throws CertificateException {
+            // ...
+        }
+
+        @Override
+        public void checkServerTrusted(X509Certificate[] arg0, String arg1) throws CertificateException {
+            // ...
+        }
+
+        @Override
+        public X509Certificate[] getAcceptedIssuers() {
+            return null;
+        }
+    }
 }

@@ -108,8 +108,18 @@ public class SignalServiceAccountManager {
    *
    * @throws IOException
    */
+  public String requestEmailVerificationCode() throws IOException {
+    return this.pushServiceSocket.createAccount("email");
+  }
+
+  /**
+   * Request an SMS verification code.  On success, the server will send
+   * an SMS verification code to this Signal user.
+   *
+   * @throws IOException
+   */
   public void requestSmsVerificationCode() throws IOException {
-    this.pushServiceSocket.createAccount(false);
+    this.pushServiceSocket.createAccount("sms");
   }
 
   /**
@@ -119,7 +129,7 @@ public class SignalServiceAccountManager {
     * @throws IOException
    */
   public void requestVoiceVerificationCode() throws IOException {
-    this.pushServiceSocket.createAccount(true);
+    this.pushServiceSocket.createAccount("voice");
   }
 
   /**
